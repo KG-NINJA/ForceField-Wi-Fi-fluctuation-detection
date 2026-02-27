@@ -1,0 +1,12 @@
+{
+  "name": "forcefield",
+  "version": "1.0.0",
+  "description": "WiFi latency jitter sensor to browser forcefield visualization via WebSockets",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

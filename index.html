@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Forcefield Monitor</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #000;
+        font-family: "Segoe UI", Roboto, Arial, sans-serif;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+
+      #overlay {
+        position: fixed;
+        top: 14px;
+        left: 14px;
+        z-index: 10;
+        color: #d5e7ff;
+        font-size: 15px;
+        line-height: 1.4;
+        letter-spacing: 0.06em;
+        text-shadow: 0 0 10px rgba(120, 170, 255, 0.9);
+        user-select: none;
+      }
+
+      #status {
+        margin-top: 8px;
+        font-weight: 700;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="scene"></canvas>
+    <div id="overlay">
+      <div id="latency">Latency: -- ms</div>
+      <div id="score">Score: --</div>
+      <div id="status">Status: CALM</div>
+      <div id="ws">WS: CONNECTING</div>
+    </div>
+
+    <script>
+      const canvas = document.getElementById("scene");
+      const ctx = canvas.getContext("2d");
+      const latencyEl = document.getElementById("latency");
+      const scoreEl = document.getElementById("score");
+      const statusEl = document.getElementById("status");
+      const wsEl = document.getElementById("ws");
+
+      let width = 0;
+      let height = 0;
+      let nowScore = 0;
+      let prevScore = 0;
+      let nowLatency = 0;
+      let nowMicro = 0;
+      let rotation = 0;
+      let pulse = 0;
+
+      function resize() {
+        width = window.innerWidth;
+        height = window.innerHeight;
+        canvas.width = Math.floor(width * window.devicePixelRatio);
+        canvas.height = Math.floor(height * window.devicePixelRatio);
+        ctx.setTransform(window.devicePixelRatio, 0, 0, window.devicePixelRatio, 0, 0);
+      }
+
+      function getStatus(score) {
+        if (score >= 5) return "INTRUSION";
+        if (score >= 3) return "UNSTABLE";
+        return "CALM";
+      }
+
+      function chooseRobotVoice() {
+        const voices = speechSynthesis.getVoices();
+        if (!voices.length) return null;
+        const candidates = voices.filter((voice) =>
+          /robot|android|david|mark|zira|google us english/i.test(voice.name)
+        );
+        return candidates[0] || voices[0];
+      }
+
+      function speakIntrusion() {
+        if (!("speechSynthesis" in window)) return;
+        const utterance = new SpeechSynthesisUtterance(
+          "An intruder has penetrated our forcefield"
+        );
+        utterance.rate = 0.86;
+        utterance.pitch = 0.62;
+        utterance.volume = 1;
+        const voice = chooseRobotVoice();
+        if (voice) utterance.voice = voice;
+        speechSynthesis.cancel();
+        speechSynthesis.speak(utterance);
+      }
+
+      function connectSocket() {
+        wsEl.textContent = "WS: CONNECTING";
+        const candidates = ["ws://localhost:8080", "ws://127.0.0.1:8080"];
+        const sameOrigin =
+          window.location.host && window.location.protocol !== "file:"
+            ? `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}`
+            : null;
+        if (sameOrigin && !candidates.includes(sameOrigin)) {
+          candidates.unshift(sameOrigin);
+        }
+
+        let ws = null;
+        let connected = false;
+        for (const url of candidates) {
+          try {
+            ws = new WebSocket(url);
+            ws.datasetUrl = url;
+            break;
+          } catch (error) {
+          }
+        }
+        if (!ws) {
+          wsEl.textContent = "WS: FAILED";
+          setTimeout(connectSocket, 1000);
+          return;
+        }
+
+        ws.addEventListener("open", () => {
+          connected = true;
+          wsEl.textContent = `WS: CONNECTED (${ws.datasetUrl})`;
+        });
+
+        ws.addEventListener("message", (event) => {
+          let payload;
+          try {
+            payload = JSON.parse(event.data);
+          } catch (error) {
+            return;
+          }
+          if (
+            typeof payload !== "object" ||
+            payload === null ||
+            typeof payload.score !== "number" ||
+            typeof payload.latency !== "number"
+          ) {
+            return;
+          }
+
+          prevScore = nowScore;
+          nowScore = payload.score;
+          nowLatency = payload.latency;
+          nowMicro =
+            typeof payload.micro === "number" && Number.isFinite(payload.micro)
+              ? Math.max(0, Math.min(1, payload.micro))
+              : 0;
+
+          latencyEl.textContent = `Latency: ${Math.round(nowLatency)} ms`;
+          scoreEl.textContent = `Score: ${nowScore.toFixed(1)}`;
+          statusEl.textContent = `Status: ${getStatus(nowScore)}`;
+
+          if (prevScore < 5 && nowScore >= 5) {
+            speakIntrusion();
+          }
+        });
+
+        ws.addEventListener("close", () => {
+          wsEl.textContent = "WS: RETRYING";
+          setTimeout(connectSocket, 1000);
+        });
+
+        ws.addEventListener("error", () => {
+          if (!connected) {
+            wsEl.textContent = "WS: ERROR RETRYING";
+          }
+        });
+      }
+
+      function drawHexagon(cx, cy, radius, angle, distortion = 0, color = "#6db6ff") {
+        ctx.beginPath();
+        for (let i = 0; i < 6; i += 1) {
+          const a = angle + (Math.PI * 2 * i) / 6;
+          const wobble = 1 + distortion * Math.sin(pulse * 3 + i * 2.6);
+          const x = cx + Math.cos(a) * radius * wobble;
+          const y = cy + Math.sin(a) * radius * wobble;
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.closePath();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      function draw() {
+        requestAnimationFrame(draw);
+
+        const status = getStatus(nowScore);
+        const centerX = width * 0.5;
+        const centerY = height * 0.5;
+        const baseRadius = Math.min(width, height) * 0.18;
+
+        let speed = 0.0015;
+        let glow = "rgba(100, 170, 255, 0.42)";
+        let color = "#73beff";
+        let distortion = 0.01;
+        let shake = 0;
+
+        if (status === "UNSTABLE") {
+          speed = 0.0045;
+          glow = "rgba(187, 100, 255, 0.5)";
+          color = "#b17dff";
+          distortion = 0.06;
+        } else if (status === "INTRUSION") {
+          speed = 0.014;
+          glow = "rgba(255, 70, 70, 0.55)";
+          color = "#ff5f5f";
+          distortion = 0.13;
+          shake = 7;
+        }
+
+        const microDistortion = nowMicro * 0.04;
+        const microPulseBoost = nowMicro * 0.02;
+        const microGlowBoost = nowMicro * 10;
+
+        rotation += speed * (0.5 + nowScore * 0.2);
+        pulse += 0.01 + nowScore * 0.003 + microPulseBoost;
+
+        const offsetX = shake ? (Math.random() - 0.5) * shake : 0;
+        const offsetY = shake ? (Math.random() - 0.5) * shake : 0;
+
+        ctx.clearRect(0, 0, width, height);
+        ctx.fillStyle = "rgba(0, 0, 0, 0.32)";
+        ctx.fillRect(0, 0, width, height);
+
+        const pulseScale = 1 + Math.sin(pulse) * (status === "INTRUSION" ? 0.18 : 0.06);
+
+        ctx.save();
+        ctx.translate(offsetX, offsetY);
+        ctx.shadowColor = glow;
+        ctx.shadowBlur = (status === "INTRUSION" ? 40 : 25) + microGlowBoost;
+
+        drawHexagon(
+          centerX,
+          centerY,
+          baseRadius * pulseScale,
+          rotation,
+          distortion + microDistortion,
+          color
+        );
+        drawHexagon(
+          centerX,
+          centerY,
+          baseRadius * 1.45 * (1 + Math.sin(pulse * 0.6) * 0.04),
+          -rotation * 0.8,
+          (distortion + microDistortion) * 0.8,
+          color
+        );
+
+        if (status === "INTRUSION") {
+          for (let i = 0; i < 18; i += 1) {
+            const angle = rotation * 2 + (Math.PI * 2 * i) / 18;
+            const r = baseRadius * (1.7 + (i % 3) * 0.18);
+            const x = centerX + Math.cos(angle) * r;
+            const y = centerY + Math.sin(angle) * r;
+            ctx.beginPath();
+            ctx.moveTo(x, y);
+            ctx.lineTo(
+              x + Math.cos(angle + pulse * 0.2) * 14,
+              y + Math.sin(angle + pulse * 0.2) * 14
+            );
+            ctx.strokeStyle = "rgba(255, 95, 95, 0.75)";
+            ctx.lineWidth = 1.2;
+            ctx.stroke();
+          }
+        }
+
+        ctx.restore();
+      }
+
+      window.addEventListener("resize", resize);
+      speechSynthesis.onvoiceschanged = () => {};
+      resize();
+      connectSocket();
+      draw();
+    </script>
+  </body>
+</html>
